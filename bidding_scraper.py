@@ -559,7 +559,7 @@ def generate_report(items, date_str):
 
 # ========== 企业微信推送 ==========
 def push_to_wecom(items, date_str, report_path):
-    """推送招投标日报到企业微信群（全部信息，无限制）"""
+    """推送招投标日报到企业微信群（自动截断，确保不超过4096字符限制）"""
     logger.info("正在推送日报到企业微信...")
 
     cat_count = {}
@@ -568,27 +568,57 @@ def push_to_wecom(items, date_str, report_path):
         cat_count[cat] = cat_count.get(cat, 0) + 1
 
     total = len(items)
+    MAX_LENGTH = 4000  # 留一些余量，避免刚好4096
 
-    lines = []
-    lines.append(f"## 🔬 手术显微镜招投标日报")
-    lines.append(f"> 日期：**{date_str}**")
-    lines.append(f"")
+    # 构建头部信息（固定部分）
+    header_lines = []
+    header_lines.append(f"## 🔬 手术显微镜招投标日报")
+    header_lines.append(f"> 日期：**{date_str}**")
+    header_lines.append(f"")
 
     if total == 0:
-        lines.append(f"> ⚠️ 今日暂无新的手术显微镜相关招投标信息")
-    else:
-        lines.append(f"**📊 今日共 {total} 条信息**")
-        lines.append("")
+        header_lines.append(f"> ⚠️ 今日暂无新的手术显微镜相关招投标信息")
+        content = '\n'.join(header_lines)
+        _send_wecom(content)
+        return
 
-        for cat, count in sorted(cat_count.items(), key=lambda x: -x[1]):
-            lines.append(f"- {cat}：{count} 条")
-        lines.append("")
+    header_lines.append(f"**📊 今日共 {total} 条信息**")
+    header_lines.append("")
 
-        # 招标信息（全部推送）
-        bidding_items = [i for i in items if i.category == '招标信息']
-        if bidding_items:
-            lines.append(f"### 🔔 招标信息（共{len(bidding_items)}条）")
-            for item in bidding_items:
+    for cat, count in sorted(cat_count.items(), key=lambda x: -x[1]):
+        header_lines.append(f"- {cat}：{count} 条")
+    header_lines.append("")
+
+    header = '\n'.join(header_lines)
+    footer = "\n\n> 📎 完整报告请查看GitHub仓库"
+
+    # 计算可用空间
+    available_space = MAX_LENGTH - len(header) - len(footer)
+
+    # 构建内容部分
+    content_lines = []
+
+    # 优先显示招标信息
+    bidding_items = [i for i in items if i.category == '招标信息']
+    if bidding_items:
+        content_lines.append(f"### 🔔 招标信息（共{len(bidding_items)}条）")
+        for item in bidding_items:
+            info = f"- [{item.title}]({item.url})" if item.url else f"- {item.title}"
+            if item.publish_date:
+                info += f"  ({item.publish_date})"
+            if item.region:
+                info += f"  [{item.region}]"
+            if item.budget:
+                info += f"  💰{item.budget}"
+            content_lines.append(info)
+        content_lines.append("")
+
+    # 其他类型
+    for cat in ['中标信息', '预采购信息', '调研信息', '变更信息']:
+        cat_items = [i for i in items if i.category == cat]
+        if cat_items:
+            content_lines.append(f"### 📋 {cat}（共{len(cat_items)}条）")
+            for item in cat_items:
                 info = f"- [{item.title}]({item.url})" if item.url else f"- {item.title}"
                 if item.publish_date:
                     info += f"  ({item.publish_date})"
@@ -596,27 +626,32 @@ def push_to_wecom(items, date_str, report_path):
                     info += f"  [{item.region}]"
                 if item.budget:
                     info += f"  💰{item.budget}"
-                lines.append(info)
-            lines.append("")
+                content_lines.append(info)
+            content_lines.append("")
 
-        # 其他类型（全部推送）
-        for cat in ['中标信息', '预采购信息', '调研信息', '变更信息']:
-            cat_items = [i for i in items if i.category == cat]
-            if cat_items:
-                lines.append(f"### 📋 {cat}（共{len(cat_items)}条）")
-                for item in cat_items:
-                    info = f"- [{item.title}]({item.url})" if item.url else f"- {item.title}"
-                    if item.publish_date:
-                        info += f"  ({item.publish_date})"
-                    if item.region:
-                        info += f"  [{item.region}]"
-                    if item.budget:
-                        info += f"  💰{item.budget}"
-                    lines.append(info)
-                lines.append("")
+    # 截断内容以适应长度限制
+    body = '\n'.join(content_lines)
+    if len(header) + len(body) + len(footer) > MAX_LENGTH:
+        # 需要截断
+        truncated_lines = []
+        current_length = len(header) + len(footer)
 
-    content = '\n'.join(lines)
+        for line in content_lines:
+            if current_length + len(line) + 1 <= MAX_LENGTH - 50:  # 留50字符余量
+                truncated_lines.append(line)
+                current_length += len(line) + 1
+            else:
+                truncated_lines.append(f"\n> ... 还有 {total - len(truncated_lines)} 条信息，请查看完整报告")
+                break
 
+        body = '\n'.join(truncated_lines)
+
+    content = header + body + footer
+    _send_wecom(content)
+
+
+def _send_wecom(content):
+    """发送企业微信消息"""
     payload = {
         "msgtype": "markdown",
         "markdown": {
@@ -628,7 +663,7 @@ def push_to_wecom(items, date_str, report_path):
     result = resp.json()
 
     if result.get('errcode') == 0:
-        logger.info("✅ 企业微信推送成功！")
+        logger.info(f"✅ 企业微信推送成功！({len(content)} 字符)")
     else:
         logger.error(f"❌ 企业微信推送失败: {result}")
 
