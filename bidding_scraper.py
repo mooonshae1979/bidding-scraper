@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-手术显微镜招投标信息爬虫 (Playwright版 v2)
+手术显微镜招投标信息爬虫 (Playwright版 v3)
 数据源：
   1. 必联网/采招网 (bidcenter.com.cn) - 第一信源，需登录
   2. 中国国际招标网 (chinabidding.com) - 第二信源，需登录
   3. 中国政府采购网 (ccgp.gov.cn) - 补充信源，无需登录
+  4. 中国医院招标网 (e120.org.cn) - 医院专业信源，无需登录
 
 输出：Markdown 格式的每日汇总报告
 """
@@ -359,6 +360,114 @@ def scrape_ccgp(page, keyword, target_date):
     return items
 
 
+# ========== 中国医院招标网爬虫 ==========
+def scrape_e120(page, keyword, target_date):
+    """爬取中国医院招标网 (e120.org.cn) - 医院专业信源"""
+    items = []
+    logger.info(f"[医院招标网] 搜索关键词: '{keyword}'")
+
+    try:
+        # 中国医院招标网列表页
+        # URL格式: http://www.e120.org.cn/l_hospital-zhaobiao_{page}.html
+        base_url = "http://www.e120.org.cn"
+        list_url = f"{base_url}/l_hospital-zhaobiao_1.html"
+
+        page.goto(list_url, wait_until="networkidle", timeout=30000)
+        time.sleep(3)
+
+        # 解析列表页
+        # 页面结构：表格形式，每行包含省份、标题、日期
+        rows = page.query_selector_all('table tr, .list-item, .news-item')
+
+        if not rows:
+            # 尝试其他选择器
+            rows = page.query_selector_all('div[class*="list"] > div, div[class*="item"]')
+
+        logger.info(f"[医院招标网] 找到 {len(rows)} 行数据")
+
+        for row in rows:
+            try:
+                row_text = row.inner_text()
+
+                # 过滤关键词
+                if keyword not in row_text and '显微' not in row_text:
+                    continue
+
+                item = BiddingItem()
+                item.source = "中国医院招标网"
+
+                # 提取标题和链接
+                link = row.query_selector('a')
+                if link:
+                    item.title = link.inner_text().strip()
+                    href = link.get_attribute('href') or ""
+                    if href.startswith('/'):
+                        item.url = base_url + href
+                    elif href.startswith('http'):
+                        item.url = href
+                    else:
+                        item.url = base_url + '/' + href
+                else:
+                    # 从文本中提取标题
+                    title_match = re.search(r'([^\s]{10,100})', row_text)
+                    if title_match:
+                        item.title = title_match.group(1)
+
+                if not item.title or len(item.title) < 5:
+                    continue
+
+                # 提取日期
+                date_match = re.search(r'(\d{4}[-/]\d{1,2}[-/]\d{1,2})', row_text)
+                if date_match:
+                    item.publish_date = date_match.group(1).replace('/', '-')
+                else:
+                    # 尝试匹配 MM-DD 格式
+                    date_match = re.search(r'(\d{2}-\d{2})', row_text)
+                    if date_match:
+                        mm_dd = date_match.group(1)
+                        year = datetime.now().year
+                        item.publish_date = f"{year}-{mm_dd}"
+
+                # 提取地区（省份）
+                region_match = re.search(
+                    r'(北京|上海|天津|重庆|河北|山西|辽宁|吉林|黑龙江|'
+                    r'江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|'
+                    r'广东|海南|四川|贵州|云南|陕西|甘肃|青海|'
+                    r'内蒙古|广西|西藏|宁夏|新疆)',
+                    row_text
+                )
+                if region_match:
+                    item.region = region_match.group(1)
+
+                # 判断信息类型
+                if '中标' in item.title or '成交' in item.title:
+                    item.category = "中标信息"
+                elif '变更' in item.title or '更正' in item.title:
+                    item.category = "变更信息"
+                else:
+                    item.category = "招标信息"
+
+                # 日期过滤
+                if item.publish_date and target_date:
+                    if target_date not in item.publish_date:
+                        continue
+
+                items.append(item)
+
+            except Exception as e:
+                logger.debug(f"[医院招标网] 解析行异常: {e}")
+                continue
+
+        logger.info(f"[医院招标网] 共找到 {len(items)} 条结果")
+
+    except PlaywrightTimeout:
+        logger.error("[医院招标网] ❌ 页面加载超时")
+    except Exception as e:
+        logger.error(f"[医院招标网] ❌ 爬取异常: {e}")
+
+    return items
+
+
 # ========== 报告生成器 ==========
 def generate_report(items, date_str):
     """生成Markdown格式的每日汇总报告"""
@@ -449,7 +558,7 @@ def generate_report(items, date_str):
     lines.append("---")
     lines.append("")
     lines.append("*本报告由自动化脚本生成，数据来源于公开招投标信息平台。*")
-    lines.append("*数据源：必联网/采招网、中国国际招标网、中国政府采购网*")
+    lines.append("*数据源：必联网/采招网、中国国际招标网、中国政府采购网、中国医院招标网*")
 
     report = '\n'.join(lines)
 
@@ -519,6 +628,15 @@ def main():
             all_items.extend(items3)
         except Exception as e:
             logger.error(f"政府采购网爬取失败: {e}")
+
+        time.sleep(3)
+
+        # === 4. 爬取中国医院招标网（医院专业信源）===
+        try:
+            items4 = scrape_e120(page, KEYWORD, today)
+            all_items.extend(items4)
+        except Exception as e:
+            logger.error(f"医院招标网爬取失败: {e}")
 
         browser.close()
 
