@@ -31,6 +31,7 @@ jobs:
           BIDCENTER_PASSWORD: ${{ secrets.BIDCENTER_PASSWORD }}
           CHINABIDDING_USERNAME: ${{ secrets.CHINABIDDING_USERNAME }}
           CHINABIDDING_PASSWORD: ${{ secrets.CHINABIDDING_PASSWORD }}
+          WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
           OUTPUT_DIR: ./bidding_reports
         run: python bidding_scraper.py
 

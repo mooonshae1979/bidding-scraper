@@ -41,6 +41,9 @@ BIDCENTER_PASSWORD = os.environ.get('BIDCENTER_PASSWORD', '')
 CHINABIDDING_USERNAME = os.environ.get('CHINABIDDING_USERNAME', '')
 CHINABIDDING_PASSWORD = os.environ.get('CHINABIDDING_PASSWORD', '')
 
+# 企业微信机器人Webhook地址（从环境变量读取）
+WECOM_WEBHOOK_URL = os.environ.get('WECOM_WEBHOOK_URL', '')
+
 
 # ========== 数据结构 ==========
 class BiddingItem:
@@ -645,7 +648,98 @@ def main():
     report_path = generate_report(all_items, today)
     logger.info(f"========== 任务完成！报告路径: {report_path} ==========")
 
+    # === 5. 推送到企业微信 ===
+    if WECOM_WEBHOOK_URL:
+        try:
+            push_to_wecom(all_items, today, report_path)
+        except Exception as e:
+            logger.error(f"企业微信推送失败: {e}")
+    else:
+        logger.info("未配置企业微信Webhook，跳过推送")
+
     return report_path
+
+
+# ========== 企业微信推送 ==========
+def push_to_wecom(items, date_str, report_path):
+    """推送招投标日报到企业微信群"""
+    import requests as req
+
+    logger.info("正在推送日报到企业微信...")
+
+    # 按类型分类统计
+    cat_count = {}
+    for item in items:
+        cat = item.category if item.category else '招标信息'
+        cat_count[cat] = cat_count.get(cat, 0) + 1
+
+    total = len(items)
+
+    # 构建Markdown消息（企业微信支持Markdown格式）
+    lines = []
+    lines.append(f"## 🔬 手术显微镜招投标日报")
+    lines.append(f"> 日期：**{date_str}**")
+    lines.append(f"")
+
+    if total == 0:
+        lines.append(f"> ⚠️ 今日暂无新的手术显微镜相关招投标信息")
+    else:
+        lines.append(f"**📊 今日共 {total} 条信息**")
+        lines.append("")
+
+        # 统计摘要
+        for cat, count in sorted(cat_count.items(), key=lambda x: -x[1]):
+            lines.append(f"- {cat}：{count} 条")
+        lines.append("")
+
+        # 招标信息（详细，最多显示10条）
+        bidding_items = [i for i in items if i.category == '招标信息']
+        if bidding_items:
+            lines.append("### 🔔 招标信息")
+            for item in bidding_items[:10]:
+                title = item.title[:60] + ('...' if len(item.title) > 60 else '')
+                info = f"- [{title}]({item.url})" if item.url else f"- {title}"
+                if item.publish_date:
+                    info += f"  ({item.publish_date})"
+                if item.region:
+                    info += f"  [{item.region}]"
+                lines.append(info)
+            if len(bidding_items) > 10:
+                lines.append(f"- ... 共{len(bidding_items)}条，详见完整报告")
+            lines.append("")
+
+        # 其他类型（简略，各最多显示5条）
+        for cat in ['中标信息', '预采购信息', '调研信息', '变更信息']:
+            cat_items = [i for i in items if i.category == cat]
+            if cat_items:
+                lines.append(f"### 📋 {cat}")
+                for item in cat_items[:5]:
+                    title = item.title[:50] + ('...' if len(item.title) > 50 else '')
+                    info = f"- {title}"
+                    if item.publish_date:
+                        info += f"  ({item.publish_date})"
+                    lines.append(info)
+                if len(cat_items) > 5:
+                    lines.append(f"- ... 共{len(cat_items)}条")
+                lines.append("")
+
+    content = '\n'.join(lines)
+
+    # 发送消息
+    payload = {
+        "msgtype": "markdown",
+        "markdown": {
+            "content": content
+        }
+    }
+
+    resp = req.post(WECOM_WEBHOOK_URL, json=payload, timeout=15)
+    result = resp.json()
+
+    if result.get('errcode') == 0:
+        logger.info("✅ 企业微信推送成功！")
+    else:
+        logger.error(f"❌ 企业微信推送失败: {result}")
 
 
 if __name__ == '__main__':
