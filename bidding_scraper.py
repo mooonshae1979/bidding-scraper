@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-手术显微镜招投标信息爬虫 (Playwright版 v3)
+手术显微镜招投标信息爬虫 (Playwright版 v4)
 数据源：
   1. 必联网/采招网 (bidcenter.com.cn) - 第一信源，需登录
   2. 中国国际招标网 (chinabidding.com) - 第二信源，需登录
   3. 中国政府采购网 (ccgp.gov.cn) - 补充信源，无需登录
   4. 中国医院招标网 (e120.org.cn) - 医院专业信源，无需登录
 
-输出：Markdown 格式的每日汇总报告
+输出：Markdown 格式的每日汇总报告 + 企业微信推送
 """
 
 import os
@@ -18,6 +18,7 @@ import logging
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
+import requests as http_req
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 # 配置日志
@@ -43,6 +44,10 @@ CHINABIDDING_PASSWORD = os.environ.get('CHINABIDDING_PASSWORD', '')
 
 # 企业微信机器人Webhook地址（从环境变量读取）
 WECOM_WEBHOOK_URL = os.environ.get('WECOM_WEBHOOK_URL', '')
+
+# 页面超时时间（毫秒）- GitHub Actions网络较慢，需要更长超时
+PAGE_TIMEOUT = 60000
+AJAX_TIMEOUT = 30000
 
 
 # ========== 数据结构 ==========
@@ -72,28 +77,28 @@ def scrape_bidcenter(page, keyword, target_date):
     try:
         # 登录
         logger.info("[必联网] 正在登录...")
-        page.goto("https://sso.bidcenter.com.cn/login", wait_until="networkidle", timeout=30000)
-        time.sleep(2)
+        page.goto("https://sso.bidcenter.com.cn/login", wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
+        time.sleep(3)
         page.fill('input[placeholder="手机号/用户名"]', BIDCENTER_USERNAME)
         time.sleep(0.5)
         page.fill('input[placeholder="密码"]', BIDCENTER_PASSWORD)
         time.sleep(0.5)
         page.click('a:has-text("快速登录")')
-        time.sleep(3)
+        time.sleep(5)
         logger.info("[必联网] ✅ 登录成功！")
 
         # 搜索
         search_url = f"https://search.bidcenter.com.cn/search?keywords={quote(keyword)}&mod=0"
-        page.goto(search_url, wait_until="networkidle", timeout=30000)
+        page.goto(search_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
 
         # 等待搜索结果加载（AJAX渲染）
         try:
-            page.wait_for_selector('.ssjg-list_cell', timeout=15000)
+            page.wait_for_selector('.ssjg-list_cell', timeout=AJAX_TIMEOUT)
         except PlaywrightTimeout:
-            logger.warning("[必联网] 搜索结果加载超时")
-            return items
+            logger.warning("[必联网] 搜索结果加载超时，尝试继续解析...")
+            # 即使超时也尝试解析已有内容
 
-        time.sleep(2)
+        time.sleep(3)
 
         # 解析渲染后的搜索结果
         cells = page.query_selector_all('.ssjg-list_cell')
@@ -137,7 +142,7 @@ def scrape_bidcenter(page, keyword, target_date):
                 # 获取整个cell的文本用于提取更多信息
                 cell_text = cell.inner_text()
 
-                # 日期 - 从cell文本中提取
+                # 日期
                 date_match = re.search(r'(\d{4}[-/]\d{1,2}[-/]\d{1,2})', cell_text)
                 if date_match:
                     item.publish_date = date_match.group(1).replace('/', '-')
@@ -196,14 +201,14 @@ def scrape_chinabidding(page, keyword, target_date):
         # 登录
         logger.info("[中国国际招标网] 正在登录...")
         page.goto("https://www.chinabidding.com/bid/index/loginIndex.htm",
-                   wait_until="networkidle", timeout=30000)
-        time.sleep(2)
+                   wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
+        time.sleep(3)
         page.fill('input[placeholder="用户名/手机/邮箱"]', CHINABIDDING_USERNAME)
         time.sleep(0.5)
         page.fill('input[placeholder="密码"]', CHINABIDDING_PASSWORD)
         time.sleep(0.5)
         page.click('button:has-text("登录")')
-        time.sleep(3)
+        time.sleep(5)
         logger.info("[中国国际招标网] ✅ 登录成功！")
 
         # 搜索不同类型的公告
@@ -216,11 +221,9 @@ def scrape_chinabidding(page, keyword, target_date):
         for po_class, type_label, category in search_types:
             try:
                 search_url = f"https://www.chinabidding.com/search/proj.htm?key={quote(keyword)}&poClass={po_class}&page=1"
-                page.goto(search_url, wait_until="networkidle", timeout=30000)
-                time.sleep(3)
+                page.goto(search_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
+                time.sleep(5)
 
-                # 解析结果 - chinabidding的搜索结果在渲染后的DOM中
-                # 使用多种选择器尝试
                 type_items = []
 
                 # 方法1: h5 > a
@@ -243,7 +246,6 @@ def scrape_chinabidding(page, keyword, target_date):
                         else:
                             item.url = href
 
-                        # 从父元素提取日期和地区
                         parent_text = link.evaluate_handle("el => { let p = el.closest('div'); return p ? p.innerText : ''; }")
                         parent_text = parent_text.inner_text() if parent_text else ""
 
@@ -263,9 +265,8 @@ def scrape_chinabidding(page, keyword, target_date):
                     except Exception:
                         continue
 
-                # 方法2: 如果h5没找到，尝试其他选择器
+                # 方法2: 备用选择器
                 if not type_items:
-                    # 尝试 .search-list 或其他容器
                     all_links = page.query_selector_all('.search-list a, .list-content a, .bid-list a')
                     for link in all_links:
                         try:
@@ -286,7 +287,7 @@ def scrape_chinabidding(page, keyword, target_date):
 
                 items.extend(type_items)
                 logger.info(f"  {type_label}: {len(type_items)} 条")
-                time.sleep(2)
+                time.sleep(3)
 
             except Exception as e:
                 logger.error(f"  搜索{type_label}异常: {e}")
@@ -327,8 +328,8 @@ def scrape_ccgp(page, keyword, target_date):
                 f"&timeType=6&displayZone=&zoneId=&pppStatus=&agentName="
             )
             url = f"http://search.ccgp.gov.cn/bxsearch{params}"
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            time.sleep(2)
+            page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
+            time.sleep(3)
 
             list_items = page.query_selector_all('.vT-srch-result-list-bid li')
             for li in list_items:
@@ -353,7 +354,8 @@ def scrape_ccgp(page, keyword, target_date):
                 except Exception:
                     continue
 
-            logger.info(f"  {type_name}: {len([i for i in items if i.source == '中国政府采购网'])} 条")
+            ccgp_count = len([i for i in items if i.source == '中国政府采购网'])
+            logger.info(f"  {type_name}: {ccgp_count} 条")
             time.sleep(3)
 
         except Exception as e:
@@ -370,20 +372,15 @@ def scrape_e120(page, keyword, target_date):
     logger.info(f"[医院招标网] 搜索关键词: '{keyword}'")
 
     try:
-        # 中国医院招标网列表页
-        # URL格式: http://www.e120.org.cn/l_hospital-zhaobiao_{page}.html
         base_url = "http://www.e120.org.cn"
         list_url = f"{base_url}/l_hospital-zhaobiao_1.html"
 
-        page.goto(list_url, wait_until="networkidle", timeout=30000)
-        time.sleep(3)
+        page.goto(list_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
+        time.sleep(5)
 
-        # 解析列表页
-        # 页面结构：表格形式，每行包含省份、标题、日期
         rows = page.query_selector_all('table tr, .list-item, .news-item')
 
         if not rows:
-            # 尝试其他选择器
             rows = page.query_selector_all('div[class*="list"] > div, div[class*="item"]')
 
         logger.info(f"[医院招标网] 找到 {len(rows)} 行数据")
@@ -392,14 +389,12 @@ def scrape_e120(page, keyword, target_date):
             try:
                 row_text = row.inner_text()
 
-                # 过滤关键词
                 if keyword not in row_text and '显微' not in row_text:
                     continue
 
                 item = BiddingItem()
                 item.source = "中国医院招标网"
 
-                # 提取标题和链接
                 link = row.query_selector('a')
                 if link:
                     item.title = link.inner_text().strip()
@@ -411,7 +406,6 @@ def scrape_e120(page, keyword, target_date):
                     else:
                         item.url = base_url + '/' + href
                 else:
-                    # 从文本中提取标题
                     title_match = re.search(r'([^\s]{10,100})', row_text)
                     if title_match:
                         item.title = title_match.group(1)
@@ -419,19 +413,16 @@ def scrape_e120(page, keyword, target_date):
                 if not item.title or len(item.title) < 5:
                     continue
 
-                # 提取日期
                 date_match = re.search(r'(\d{4}[-/]\d{1,2}[-/]\d{1,2})', row_text)
                 if date_match:
                     item.publish_date = date_match.group(1).replace('/', '-')
                 else:
-                    # 尝试匹配 MM-DD 格式
                     date_match = re.search(r'(\d{2}-\d{2})', row_text)
                     if date_match:
                         mm_dd = date_match.group(1)
                         year = datetime.now().year
                         item.publish_date = f"{year}-{mm_dd}"
 
-                # 提取地区（省份）
                 region_match = re.search(
                     r'(北京|上海|天津|重庆|河北|山西|辽宁|吉林|黑龙江|'
                     r'江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|'
@@ -442,7 +433,6 @@ def scrape_e120(page, keyword, target_date):
                 if region_match:
                     item.region = region_match.group(1)
 
-                # 判断信息类型
                 if '中标' in item.title or '成交' in item.title:
                     item.category = "中标信息"
                 elif '变更' in item.title or '更正' in item.title:
@@ -450,7 +440,6 @@ def scrape_e120(page, keyword, target_date):
                 else:
                     item.category = "招标信息"
 
-                # 日期过滤
                 if item.publish_date and target_date:
                     if target_date not in item.publish_date:
                         continue
@@ -476,7 +465,6 @@ def generate_report(items, date_str):
     """生成Markdown格式的每日汇总报告"""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # 按信息类型分类
     categories = {
         '招标信息': [],
         '预采购信息': [],
@@ -500,7 +488,6 @@ def generate_report(items, date_str):
                 unique.append(item)
         categories[cat] = unique
 
-    # 构建报告
     lines = []
     lines.append("# 手术显微镜招投标信息日报")
     lines.append("")
@@ -509,7 +496,6 @@ def generate_report(items, date_str):
     lines.append(f"**关键词**: {KEYWORD}")
     lines.append("")
 
-    # 统计摘要
     total = sum(len(v) for v in categories.values())
     lines.append("## 今日摘要")
     lines.append("")
@@ -520,7 +506,6 @@ def generate_report(items, date_str):
     lines.append(f"| **合计** | **{total}** |")
     lines.append("")
 
-    # 详细招标信息
     if categories['招标信息']:
         lines.append("---")
         lines.append("")
@@ -537,7 +522,6 @@ def generate_report(items, date_str):
             )
         lines.append("")
 
-    # 简略通知类信息
     for cat in ['预采购信息', '调研信息', '中标信息', '变更信息']:
         if categories[cat]:
             lines.append("---")
@@ -557,7 +541,6 @@ def generate_report(items, date_str):
                 lines.append(f"- {' | '.join(info_parts)}")
             lines.append("")
 
-    # 页脚
     lines.append("---")
     lines.append("")
     lines.append("*本报告由自动化脚本生成，数据来源于公开招投标信息平台。*")
@@ -565,7 +548,6 @@ def generate_report(items, date_str):
 
     report = '\n'.join(lines)
 
-    # 保存
     filename = f"手术显微镜招投标日报_{date_str}.md"
     filepath = os.path.join(OUTPUT_DIR, filename)
     with open(filepath, 'w', encoding='utf-8') as f:
@@ -573,6 +555,82 @@ def generate_report(items, date_str):
 
     logger.info(f"报告已生成: {filepath}")
     return filepath
+
+
+# ========== 企业微信推送 ==========
+def push_to_wecom(items, date_str, report_path):
+    """推送招投标日报到企业微信群（全部信息，无限制）"""
+    logger.info("正在推送日报到企业微信...")
+
+    cat_count = {}
+    for item in items:
+        cat = item.category if item.category else '招标信息'
+        cat_count[cat] = cat_count.get(cat, 0) + 1
+
+    total = len(items)
+
+    lines = []
+    lines.append(f"## 🔬 手术显微镜招投标日报")
+    lines.append(f"> 日期：**{date_str}**")
+    lines.append(f"")
+
+    if total == 0:
+        lines.append(f"> ⚠️ 今日暂无新的手术显微镜相关招投标信息")
+    else:
+        lines.append(f"**📊 今日共 {total} 条信息**")
+        lines.append("")
+
+        for cat, count in sorted(cat_count.items(), key=lambda x: -x[1]):
+            lines.append(f"- {cat}：{count} 条")
+        lines.append("")
+
+        # 招标信息（全部推送）
+        bidding_items = [i for i in items if i.category == '招标信息']
+        if bidding_items:
+            lines.append(f"### 🔔 招标信息（共{len(bidding_items)}条）")
+            for item in bidding_items:
+                info = f"- [{item.title}]({item.url})" if item.url else f"- {item.title}"
+                if item.publish_date:
+                    info += f"  ({item.publish_date})"
+                if item.region:
+                    info += f"  [{item.region}]"
+                if item.budget:
+                    info += f"  💰{item.budget}"
+                lines.append(info)
+            lines.append("")
+
+        # 其他类型（全部推送）
+        for cat in ['中标信息', '预采购信息', '调研信息', '变更信息']:
+            cat_items = [i for i in items if i.category == cat]
+            if cat_items:
+                lines.append(f"### 📋 {cat}（共{len(cat_items)}条）")
+                for item in cat_items:
+                    info = f"- [{item.title}]({item.url})" if item.url else f"- {item.title}"
+                    if item.publish_date:
+                        info += f"  ({item.publish_date})"
+                    if item.region:
+                        info += f"  [{item.region}]"
+                    if item.budget:
+                        info += f"  💰{item.budget}"
+                    lines.append(info)
+                lines.append("")
+
+    content = '\n'.join(lines)
+
+    payload = {
+        "msgtype": "markdown",
+        "markdown": {
+            "content": content
+        }
+    }
+
+    resp = http_req.post(WECOM_WEBHOOK_URL, json=payload, timeout=15)
+    result = resp.json()
+
+    if result.get('errcode') == 0:
+        logger.info("✅ 企业微信推送成功！")
+    else:
+        logger.error(f"❌ 企业微信推送失败: {result}")
 
 
 # ========== 主流程 ==========
@@ -643,12 +701,12 @@ def main():
 
         browser.close()
 
-    # === 4. 生成报告 ===
+    # === 5. 生成报告 ===
     logger.info(f"========== 共收集 {len(all_items)} 条信息 ==========")
     report_path = generate_report(all_items, today)
     logger.info(f"========== 任务完成！报告路径: {report_path} ==========")
 
-    # === 5. 推送到企业微信 ===
+    # === 6. 推送到企业微信 ===
     if WECOM_WEBHOOK_URL:
         try:
             push_to_wecom(all_items, today, report_path)
@@ -658,88 +716,6 @@ def main():
         logger.info("未配置企业微信Webhook，跳过推送")
 
     return report_path
-
-
-# ========== 企业微信推送 ==========
-def push_to_wecom(items, date_str, report_path):
-    """推送招投标日报到企业微信群"""
-    import requests as req
-
-    logger.info("正在推送日报到企业微信...")
-
-    # 按类型分类统计
-    cat_count = {}
-    for item in items:
-        cat = item.category if item.category else '招标信息'
-        cat_count[cat] = cat_count.get(cat, 0) + 1
-
-    total = len(items)
-
-    # 构建Markdown消息（企业微信支持Markdown格式）
-    lines = []
-    lines.append(f"## 🔬 手术显微镜招投标日报")
-    lines.append(f"> 日期：**{date_str}**")
-    lines.append(f"")
-
-    if total == 0:
-        lines.append(f"> ⚠️ 今日暂无新的手术显微镜相关招投标信息")
-    else:
-        lines.append(f"**📊 今日共 {total} 条信息**")
-        lines.append("")
-
-        # 统计摘要
-        for cat, count in sorted(cat_count.items(), key=lambda x: -x[1]):
-            lines.append(f"- {cat}：{count} 条")
-        lines.append("")
-
-        # 招标信息（全部推送，无限制）
-        bidding_items = [i for i in items if i.category == '招标信息']
-        if bidding_items:
-            lines.append(f"### 🔔 招标信息（共{len(bidding_items)}条）")
-            for item in bidding_items:
-                info = f"- [{item.title}]({item.url})" if item.url else f"- {item.title}"
-                if item.publish_date:
-                    info += f"  ({item.publish_date})"
-                if item.region:
-                    info += f"  [{item.region}]"
-                if item.budget:
-                    info += f"  💰{item.budget}"
-                lines.append(info)
-            lines.append("")
-
-        # 其他类型（全部推送，无限制）
-        for cat in ['中标信息', '预采购信息', '调研信息', '变更信息']:
-            cat_items = [i for i in items if i.category == cat]
-            if cat_items:
-                lines.append(f"### 📋 {cat}（共{len(cat_items)}条）")
-                for item in cat_items:
-                    info = f"- [{item.title}]({item.url})" if item.url else f"- {item.title}"
-                    if item.publish_date:
-                        info += f"  ({item.publish_date})"
-                    if item.region:
-                        info += f"  [{item.region}]"
-                    if item.budget:
-                        info += f"  💰{item.budget}"
-                    lines.append(info)
-                lines.append("")
-
-    content = '\n'.join(lines)
-
-    # 发送消息
-    payload = {
-        "msgtype": "markdown",
-        "markdown": {
-            "content": content
-        }
-    }
-
-    resp = req.post(WECOM_WEBHOOK_URL, json=payload, timeout=15)
-    result = resp.json()
-
-    if result.get('errcode') == 0:
-        logger.info("✅ 企业微信推送成功！")
-    else:
-        logger.error(f"❌ 企业微信推送失败: {result}")
 
 
 if __name__ == '__main__':
