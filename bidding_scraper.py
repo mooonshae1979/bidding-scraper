@@ -692,35 +692,35 @@ def push_to_wecom(items, date_str, report_path):
             lines.append(f"- {cat}：{count} 条")
         lines.append("")
 
-        # 招标信息（详细，最多显示10条）
+        # 招标信息（全部推送，无限制）
         bidding_items = [i for i in items if i.category == '招标信息']
         if bidding_items:
-            lines.append("### 🔔 招标信息")
-            for item in bidding_items[:10]:
-                title = item.title[:60] + ('...' if len(item.title) > 60 else '')
-                info = f"- [{title}]({item.url})" if item.url else f"- {title}"
+            lines.append(f"### 🔔 招标信息（共{len(bidding_items)}条）")
+            for item in bidding_items:
+                info = f"- [{item.title}]({item.url})" if item.url else f"- {item.title}"
                 if item.publish_date:
                     info += f"  ({item.publish_date})"
                 if item.region:
                     info += f"  [{item.region}]"
+                if item.budget:
+                    info += f"  💰{item.budget}"
                 lines.append(info)
-            if len(bidding_items) > 10:
-                lines.append(f"- ... 共{len(bidding_items)}条，详见完整报告")
             lines.append("")
 
-        # 其他类型（简略，各最多显示5条）
+        # 其他类型（全部推送，无限制）
         for cat in ['中标信息', '预采购信息', '调研信息', '变更信息']:
             cat_items = [i for i in items if i.category == cat]
             if cat_items:
-                lines.append(f"### 📋 {cat}")
-                for item in cat_items[:5]:
-                    title = item.title[:50] + ('...' if len(item.title) > 50 else '')
-                    info = f"- {title}"
+                lines.append(f"### 📋 {cat}（共{len(cat_items)}条）")
+                for item in cat_items:
+                    info = f"- [{item.title}]({item.url})" if item.url else f"- {item.title}"
                     if item.publish_date:
                         info += f"  ({item.publish_date})"
+                    if item.region:
+                        info += f"  [{item.region}]"
+                    if item.budget:
+                        info += f"  💰{item.budget}"
                     lines.append(info)
-                if len(cat_items) > 5:
-                    lines.append(f"- ... 共{len(cat_items)}条")
                 lines.append("")
 
     content = '\n'.join(lines)
