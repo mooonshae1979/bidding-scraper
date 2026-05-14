@@ -1,0 +1,50 @@
+name: 手术显微镜招投标日报
+
+on:
+  schedule:
+    # 每天早上9点（北京时间 = UTC 1点）
+    - cron: '0 1 * * *'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install chromium --with-deps
+
+      - name: Run scraper
+        env:
+          BIDCENTER_USERNAME: ${{ secrets.BIDCENTER_USERNAME }}
+          BIDCENTER_PASSWORD: ${{ secrets.BIDCENTER_PASSWORD }}
+          CHINABIDDING_USERNAME: ${{ secrets.CHINABIDDING_USERNAME }}
+          CHINABIDDING_PASSWORD: ${{ secrets.CHINABIDDING_PASSWORD }}
+          OUTPUT_DIR: ./bidding_reports
+        run: python bidding_scraper.py
+
+      - name: Upload report as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bidding-report-${{ github.run_number }}
+          path: bidding_reports/
+          retention-days: 90
+
+      - name: Commit report to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bidding_reports/ || true
+          git diff --staged --quiet || git commit -m "docs: 添加招投标日报 $(date +%Y-%m-%d)"
+          git push || true
