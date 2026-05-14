@@ -647,6 +647,8 @@ def main():
                 '--no-sandbox',
                 '--disable-blink-features=AutomationControlled',
                 '--disable-infobars',
+                '--disable-logging',
+                '--log-level=3',
             ]
         )
 
